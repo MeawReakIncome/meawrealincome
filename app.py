@@ -12,7 +12,7 @@ st.set_page_config(page_title="โปรแกรมสรุปยอดรา�
 st.title("📊 โปรแกรมสรุปยอดรายได้ และ คำนวณกำไร (Reconciliation)")
 
 # ==========================================
-# 📂 ส่วนที่ 1: อัปโหลดไฟล์ต้นทุน (ใช้ร่วมกันทุกแอป)
+# 📂 ส่วนที่ 1: อัปโหลดไฟล์ต้นทุน
 # ==========================================
 st.markdown("### 📂 1. อัปโหลดไฟล์ต้นทุนสินค้า (Real Cost)")
 st.info("💡 กรุณาอัปโหลดไฟล์ต้นทุนก่อนเป็นอันดับแรก เพื่อให้ระบบดึงต้นทุนไปคำนวณกำไรในแต่ละออเดอร์")
@@ -32,8 +32,16 @@ else:
 st.markdown("---")
 
 # ==========================================
-# 💾 ฟังก์ชันสำหรับสร้างไฟล์ Excel ขาออก
+# 💾 ฟังก์ชันช่วยเหลือ (อ่านไฟล์ + สร้าง Excel)
 # ==========================================
+def read_uploaded_file(uploaded_file, skiprows=None):
+    if uploaded_file.name.endswith('.csv'):
+        return pd.read_csv(uploaded_file)
+    else:
+        if skiprows:
+            return pd.read_excel(uploaded_file, skiprows=skiprows)
+        return pd.read_excel(uploaded_file)
+
 def generate_excel(df, platform_name, header_color_hex):
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -56,13 +64,8 @@ def generate_excel(df, platform_name, header_color_hex):
     output.seek(0)
     return output
 
-# ==========================================
-# 🖥️ ฟังก์ชันแสดงผลตัวเลขสรุปบนหน้าเว็บ
-# ==========================================
 def display_summary_dashboard(df, order_col, income_col, cost_col):
     st.markdown("### 📈 สรุปผลประกอบการ")
-    
-    # คำนวณรายได้ (ต้องตัดออเดอร์ซ้ำออกก่อนบวก เพื่อไม่ให้ยอดเบิ้ล)
     total_income = df.drop_duplicates(subset=[order_col])[income_col].sum()
     total_cost = df[cost_col].sum()
     total_profit = total_income - total_cost
@@ -76,11 +79,11 @@ def display_summary_dashboard(df, order_col, income_col, cost_col):
     st.dataframe(df.head(5), use_container_width=True)
 
 # ==========================================
-# 🟠 ฟังก์ชันประมวลผล Shopee (คงฟอร์มเดิม)
+# 🟠 ฟังก์ชันประมวลผล Shopee
 # ==========================================
 def process_shopee(file_income, file_orders, df_cost_data):
-    df_income = pd.read_excel(file_income, skiprows=17)
-    df_orders = pd.read_excel(file_orders)
+    df_income = read_uploaded_file(file_income, skiprows=17)
+    df_orders = read_uploaded_file(file_orders)
 
     df_income = df_income.dropna(subset=['รหัสคำสั่งซื้อ']).copy()
     df_income['รหัสคำสั่งซื้อ'] = df_income['รหัสคำสั่งซื้อ'].astype(str)
@@ -104,7 +107,6 @@ def process_shopee(file_income, file_orders, df_cost_data):
     if 'รหัสคำสั่งซื้อ' in df_orders.columns: df_orders.drop(columns=['รหัสคำสั่งซื้อ'], inplace=True)
     if 'จำนวนเงิน' in df_orders.columns: df_orders.drop(columns=['จำนวนเงิน'], inplace=True)
 
-    # แทรกคอลัมน์ใหม่ไว้หลัง 'จำนวน'
     cols = list(df_orders.columns)
     new_cols = ['ราคาต้นทุนต่อชิ้น', 'รวมต้นทุน (บาท)', 'ยอดเงินเข้าจาก Shopee (บาท)']
     cols = [c for c in cols if c not in new_cols]
@@ -115,16 +117,27 @@ def process_shopee(file_income, file_orders, df_cost_data):
     return generate_excel(df_orders, "Shopee", "F94D29"), df_orders
 
 # ==========================================
-# ⚫ ฟังก์ชันประมวลผล TikTok (คงฟอร์มเดิม)
+# ⚫ ฟังก์ชันประมวลผล TikTok
 # ==========================================
 def process_tiktok(file_income, file_orders, df_cost_data):
-    df_income = pd.read_excel(file_income)
-    df_orders = pd.read_excel(file_orders)
+    df_income = read_uploaded_file(file_income)
+    df_orders = read_uploaded_file(file_orders)
 
     df_income = df_income.dropna(subset=['หมายเลขคำสั่งซื้อ/การปรับ']).copy()
     df_income['หมายเลขคำสั่งซื้อ/การปรับ'] = df_income['หมายเลขคำสั่งซื้อ/การปรับ'].astype(str).str.replace(r'\.0$', '', regex=True)
-    df_income['จำนวนเงินที่ชำระทั้งหมด'] = pd.to_numeric(df_income['จำนวนเงินที่ชำระทั้งหมด'], errors='coerce').fillna(0)
-    net_income_df = df_income.groupby('หมายเลขคำสั่งซื้อ/การปรับ')['จำนวนเงินที่ชำระทั้งหมด'].sum().reset_index()
+
+    # 💡 จุดที่แก้ไข: เช็คชื่อคอลัมน์เงินเข้าว่า TikTok ใช้ชื่อไหน
+    income_col_name = None
+    if 'ยอดการชำระเงินทั้งหมด' in df_income.columns:
+        income_col_name = 'ยอดการชำระเงินทั้งหมด'
+    elif 'จำนวนเงินที่ชำระทั้งหมด' in df_income.columns:
+        income_col_name = 'จำนวนเงินที่ชำระทั้งหมด'
+    
+    if income_col_name:
+        df_income[income_col_name] = pd.to_numeric(df_income[income_col_name], errors='coerce').fillna(0)
+        net_income_df = df_income.groupby('หมายเลขคำสั่งซื้อ/การปรับ')[income_col_name].sum().reset_index()
+    else:
+        raise ValueError("ไม่พบคอลัมน์ยอดเงินเข้าในไฟล์ TikTok (ตรวจสอบไฟล์อีกครั้ง)")
 
     df_orders = df_orders[pd.to_numeric(df_orders['Order ID'], errors='coerce').notnull()].copy()
     df_orders['Order ID'] = df_orders['Order ID'].astype(str).str.replace(r'\.0$', '', regex=True)
@@ -140,12 +153,11 @@ def process_tiktok(file_income, file_orders, df_cost_data):
         df_orders['รวมต้นทุน (บาท)'] = 0
 
     df_orders = df_orders.merge(net_income_df, left_on='Order ID', right_on='หมายเลขคำสั่งซื้อ/การปรับ', how='left')
-    df_orders['ยอดเงินเข้าจาก TikTok (บาท)'] = df_orders['จำนวนเงินที่ชำระทั้งหมด'].fillna(0)
+    df_orders['ยอดเงินเข้าจาก TikTok (บาท)'] = df_orders[income_col_name].fillna(0)
     
     if 'หมายเลขคำสั่งซื้อ/การปรับ' in df_orders.columns: df_orders.drop(columns=['หมายเลขคำสั่งซื้อ/การปรับ'], inplace=True)
-    if 'จำนวนเงินที่ชำระทั้งหมด' in df_orders.columns: df_orders.drop(columns=['จำนวนเงินที่ชำระทั้งหมด'], inplace=True)
+    if income_col_name in df_orders.columns: df_orders.drop(columns=[income_col_name], inplace=True)
 
-    # แทรกคอลัมน์ใหม่ไว้หลัง 'Quantity'
     cols = list(df_orders.columns)
     new_cols = ['ราคาต้นทุนต่อชิ้น', 'รวมต้นทุน (บาท)', 'ยอดเงินเข้าจาก TikTok (บาท)']
     cols = [c for c in cols if c not in new_cols]
@@ -156,11 +168,11 @@ def process_tiktok(file_income, file_orders, df_cost_data):
     return generate_excel(df_orders, "TikTok", "000000"), df_orders
 
 # ==========================================
-# 🔵 ฟังก์ชันประมวลผล Lazada (คงฟอร์มเดิม)
+# 🔵 ฟังก์ชันประมวลผล Lazada
 # ==========================================
 def process_lazada(file_income, file_orders, df_cost_data):
-    df_income = pd.read_excel(file_income)
-    df_orders = pd.read_excel(file_orders)
+    df_income = read_uploaded_file(file_income)
+    df_orders = read_uploaded_file(file_orders)
 
     df_income = df_income.dropna(subset=['หมายเลขคำสั่งซื้อ']).copy()
     df_income['หมายเลขคำสั่งซื้อ'] = df_income['หมายเลขคำสั่งซื้อ'].astype(str).str.replace(r'\.0$', '', regex=True)
@@ -183,7 +195,6 @@ def process_lazada(file_income, file_orders, df_cost_data):
     if 'หมายเลขคำสั่งซื้อ' in df_orders.columns: df_orders.drop(columns=['หมายเลขคำสั่งซื้อ'], inplace=True)
     if 'จำนวนเงิน(รวมภาษี)' in df_orders.columns: df_orders.drop(columns=['จำนวนเงิน(รวมภาษี)'], inplace=True)
 
-    # แทรกคอลัมน์ใหม่ไว้หลัง 'unitPrice'
     cols = list(df_orders.columns)
     new_cols = ['ราคาต้นทุนต่อชิ้น', 'รวมต้นทุน (บาท)', 'ยอดเงินเข้าจาก Lazada (บาท)']
     cols = [c for c in cols if c not in new_cols]
@@ -235,8 +246,8 @@ with tab2:
 # --- แท็บ Lazada ---
 with tab3:
     st.header("🔵 สรุปยอด Lazada")
-    lazada_income = st.file_uploader("1. อัปโหลดไฟล์ เงินเข้า Lazada", type=['xlsx'], key="lz_inc")
-    lazada_orders = st.file_uploader("2. อัปโหลดไฟล์ คำสั่งซื้อ Lazada", type=['xlsx'], key="lz_ord")
+    lazada_income = st.file_uploader("1. อัปโหลดไฟล์ เงินเข้า Lazada", type=['xlsx', 'csv'], key="lz_inc")
+    lazada_orders = st.file_uploader("2. อัปโหลดไฟล์ คำสั่งซื้อ Lazada", type=['xlsx', 'csv'], key="lz_ord")
 
     if lazada_income and lazada_orders:
         if st.button("🚀 ประมวลผล Lazada", type="primary"):
