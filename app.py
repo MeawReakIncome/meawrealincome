@@ -34,13 +34,11 @@ st.markdown("---")
 # ==========================================
 # 💾 ฟังก์ชันช่วยเหลือ (อ่านไฟล์ + สร้าง Excel)
 # ==========================================
-def read_uploaded_file(uploaded_file, skiprows=None):
+def read_uploaded_file(uploaded_file, skiprows=None, sheet_name=0):
     if uploaded_file.name.endswith('.csv'):
-        return pd.read_csv(uploaded_file)
+        return pd.read_csv(uploaded_file, skiprows=skiprows)
     else:
-        if skiprows:
-            return pd.read_excel(uploaded_file, skiprows=skiprows)
-        return pd.read_excel(uploaded_file)
+        return pd.read_excel(uploaded_file, skiprows=skiprows, sheet_name=sheet_name)
 
 def generate_excel(df, platform_name, header_color_hex):
     wb = openpyxl.Workbook()
@@ -79,18 +77,50 @@ def display_summary_dashboard(df, order_col, income_col, cost_col):
     st.dataframe(df.head(5), use_container_width=True)
 
 # ==========================================
-# 🟠 ฟังก์ชันประมวลผล Shopee
+# 🟠 ฟังก์ชันประมวลผล Shopee (รองรับไฟล์ Income รูปแบบใหม่และแบบเก่า)
 # ==========================================
+def load_shopee_income(file_income):
+    if not file_income.name.endswith('.csv'):
+        xls = pd.ExcelFile(file_income)
+        if 'Income' in xls.sheet_names:
+            df_inc = pd.read_excel(xls, sheet_name='Income', skiprows=5)
+            order_col = 'หมายเลขคำสั่งซื้อ'
+            amt_col = 'จำนวนเงินทั้งหมดที่โอนแล้ว (฿)'
+
+            # รวมรายการปรับปรุงยอด (Adjustment) ถ้ามีชีต Adjustment
+            adj_df = pd.DataFrame(columns=['order_id', 'adj_amt'])
+            if 'Adjustment' in xls.sheet_names:
+                df_adj = pd.read_excel(xls, sheet_name='Adjustment', skiprows=12)
+                if 'รหัสคำสั่งซื้อที่เกี่ยวข้อง' in df_adj.columns and 'ยอดที่ปรับปรุง' in df_adj.columns:
+                    df_adj = df_adj.dropna(subset=['รหัสคำสั่งซื้อที่เกี่ยวข้อง']).copy()
+                    df_adj['order_id'] = df_adj['รหัสคำสั่งซื้อที่เกี่ยวข้อง'].astype(str).str.strip()
+                    df_adj['adj_amt'] = pd.to_numeric(df_adj['ยอดที่ปรับปรุง'], errors='coerce').fillna(0)
+                    adj_df = df_adj.groupby('order_id')['adj_amt'].sum().reset_index()
+
+            if order_col in df_inc.columns and amt_col in df_inc.columns:
+                df_inc = df_inc.dropna(subset=[order_col]).copy()
+                df_inc['order_id'] = df_inc[order_col].astype(str).str.strip()
+                df_inc['inc_amt'] = pd.to_numeric(df_inc[amt_col], errors='coerce').fillna(0)
+                inc_grp = df_inc.groupby('order_id')['inc_amt'].sum().reset_index()
+
+                merged = pd.merge(inc_grp, adj_df, on='order_id', how='outer').fillna(0)
+                merged['จำนวนเงิน'] = merged['inc_amt'] + merged['adj_amt']
+                return merged[['order_id', 'จำนวนเงิน']].rename(columns={'order_id': 'รหัสคำสั่งซื้อ'})
+
+    # รูปแบบเดิม (skiprows=17)
+    df_inc = read_uploaded_file(file_income, skiprows=17)
+    if 'รหัสคำสั่งซื้อ' not in df_inc.columns:
+        raise ValueError("ไม่พบคอลัมน์ 'รหัสคำสั่งซื้อ' ในไฟล์เงินเข้า Shopee (โปรดตรวจสอบชีตและหัวตาราง)")
+    df_inc = df_inc.dropna(subset=['รหัสคำสั่งซื้อ']).copy()
+    df_inc['รหัสคำสั่งซื้อ'] = df_inc['รหัสคำสั่งซื้อ'].astype(str).str.strip()
+    df_inc['จำนวนเงิน'] = pd.to_numeric(df_inc['จำนวนเงิน'], errors='coerce').fillna(0)
+    return df_inc.groupby('รหัสคำสั่งซื้อ')['จำนวนเงิน'].sum().reset_index()
+
 def process_shopee(file_income, file_orders, df_cost_data):
-    df_income = read_uploaded_file(file_income, skiprows=17)
+    net_income_df = load_shopee_income(file_income)
     df_orders = read_uploaded_file(file_orders)
 
-    df_income = df_income.dropna(subset=['รหัสคำสั่งซื้อ']).copy()
-    df_income['รหัสคำสั่งซื้อ'] = df_income['รหัสคำสั่งซื้อ'].astype(str)
-    df_income['จำนวนเงิน'] = pd.to_numeric(df_income['จำนวนเงิน'], errors='coerce').fillna(0)
-    net_income_df = df_income.groupby('รหัสคำสั่งซื้อ')['จำนวนเงิน'].sum().reset_index()
-
-    df_orders['หมายเลขคำสั่งซื้อ'] = df_orders['หมายเลขคำสั่งซื้อ'].astype(str)
+    df_orders['หมายเลขคำสั่งซื้อ'] = df_orders['หมายเลขคำสั่งซื้อ'].astype(str).str.strip()
     
     if df_cost_data is not None and 'เลขอ้างอิง SKU (SKU Reference No.)' in df_orders.columns:
         df_orders = df_orders.merge(df_cost_data[['เลข SKU', 'ราคาต้นทุน']], left_on='เลขอ้างอิง SKU (SKU Reference No.)', right_on='เลข SKU', how='left')
@@ -126,7 +156,6 @@ def process_tiktok(file_income, file_orders, df_cost_data):
     df_income = df_income.dropna(subset=['หมายเลขคำสั่งซื้อ/การปรับ']).copy()
     df_income['หมายเลขคำสั่งซื้อ/การปรับ'] = df_income['หมายเลขคำสั่งซื้อ/การปรับ'].astype(str).str.replace(r'\.0$', '', regex=True)
 
-    # 💡 จุดที่แก้ไข: เช็คชื่อคอลัมน์เงินเข้าว่า TikTok ใช้ชื่อไหน
     income_col_name = None
     if 'ยอดการชำระเงินทั้งหมด' in df_income.columns:
         income_col_name = 'ยอดการชำระเงินทั้งหมด'
